@@ -17,6 +17,7 @@ package com.android.systemui.pulse
 
 import android.content.Context
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlin.math.log10
 import kotlin.math.roundToInt
 
@@ -26,35 +27,47 @@ class PulseEngine(
     private val onDataProcessed: (FloatArray) -> Unit
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val fftFrames = Channel<ByteArray>(Channel.CONFLATED)
 
     private var fftAverage: Array<FFTAverage>? = null
     private val fudgeFactor = 20
 
-    fun processFFT(data: ByteArray) {
+    init {
         scope.launch {
-            val barCount = settingsRepo.getBarCount()
-            if (fftAverage == null || fftAverage!!.size != barCount) {
-                fftAverage = Array(barCount) { FFTAverage() }
-            }
-            val output = FloatArray(barCount)
-            for (i in 0 until barCount) {
-                val realIndex = i * 2 + 2
-                val imagIndex = i * 2 + 3
-                if (realIndex >= data.size || imagIndex >= data.size) continue
-                val rfk = data[realIndex].toInt()
-                val ifk = data[imagIndex].toInt()
-                val magnitude = (rfk * rfk + ifk * ifk).toFloat()
-                var dbValue = if (magnitude > 0) (10 * log10(magnitude.toDouble())).toInt() else 0
-                dbValue = fftAverage!![i].average(dbValue)
-                output[i] = dbValue * fudgeFactor.toFloat()
-            }
-            withContext(Dispatchers.Main) {
-                onDataProcessed(output)
+            for (data in fftFrames) {
+                processFrame(data)
             }
         }
     }
 
+    fun processFFT(data: ByteArray) {
+        fftFrames.trySend(data)
+    }
+
+    private suspend fun processFrame(data: ByteArray) {
+        val barCount = settingsRepo.getBarCount()
+        val averages = fftAverage
+            ?.takeIf { it.size == barCount }
+            ?: Array(barCount) { FFTAverage() }.also { fftAverage = it }
+        val output = FloatArray(barCount)
+        for (i in 0 until barCount) {
+            val realIndex = i * 2 + 2
+            val imagIndex = i * 2 + 3
+            if (realIndex >= data.size || imagIndex >= data.size) continue
+            val rfk = data[realIndex].toInt()
+            val ifk = data[imagIndex].toInt()
+            val magnitude = (rfk * rfk + ifk * ifk).toFloat()
+            var dbValue = if (magnitude > 0) (10 * log10(magnitude.toDouble())).toInt() else 0
+            dbValue = averages[i].average(dbValue)
+            output[i] = dbValue * fudgeFactor.toFloat()
+        }
+        withContext(Dispatchers.Main) {
+            onDataProcessed(output)
+        }
+    }
+
     fun stop() {
+        fftFrames.close()
         scope.cancel()
     }
 
