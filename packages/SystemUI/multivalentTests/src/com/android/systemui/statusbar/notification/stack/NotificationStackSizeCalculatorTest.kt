@@ -47,7 +47,11 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mock
+import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
+import org.mockito.Mockito.times
+import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when` as whenever
 import org.mockito.MockitoAnnotations
 
@@ -242,6 +246,31 @@ class NotificationStackSizeCalculatorTest : SysuiTestCase() {
 
         val height = sizeCalculator.computeHeight(stackLayout, maxNotifications, this.shelfHeight)
         assertThat(height).isEqualTo(spaceUsed)
+    }
+
+    @Test
+    fun computeHeight_maxNotifsAboveChildren_readsChildrenOnce() {
+        val rows = listOf(createMockRow(rowHeight), createMockRow(rowHeight))
+        setupChildren(rows)
+        clearInvocations(stackLayout)
+
+        sizeCalculator.computeHeight(stackLayout, rows.size + 1, shelfHeight)
+
+        rows.indices.forEach { index -> verify(stackLayout, times(1)).getChildAt(index) }
+    }
+
+    @Test
+    fun computeHeight_maxNotifsWithinChildren_onlyMeasuresNeededChildren() {
+        val rows =
+            listOf(createMockRow(rowHeight), createMockRow(rowHeight), createMockRow(rowHeight))
+        setupChildren(rows)
+        clearInvocations(*rows.toTypedArray())
+
+        sizeCalculator.computeHeight(stackLayout, /* maxNotifs= */ 1, shelfHeight)
+
+        verify(rows[0], times(1)).heightWithoutLockscreenConstraints
+        verify(rows[1], never()).heightWithoutLockscreenConstraints
+        verify(rows[2], never()).heightWithoutLockscreenConstraints
     }
 
     @Test

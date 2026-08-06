@@ -36,7 +36,6 @@ import com.android.systemui.statusbar.notification.shared.NotificationBundleUi
 import com.android.systemui.statusbar.notification.shared.NotificationMinimalism
 import com.android.systemui.statusbar.policy.SplitShadeStateController
 import com.android.systemui.util.Compile
-import com.android.systemui.util.children
 import java.io.PrintWriter
 import javax.inject.Inject
 import kotlin.math.max
@@ -201,7 +200,8 @@ constructor(
         }
         log { "\n" }
 
-        val stackHeightSequence = computeHeightPerNotificationLimit(stack, shelfHeight)
+        val children = stack.showableChildren()
+        val stackHeights = computeHeightPerNotificationLimit(stack, shelfHeight, children)
 
         // TODO: Avoid making this split shade assumption by simply checking the stack for media
         val isMediaShowing = mediaDataManager.hasActiveMedia()
@@ -210,7 +210,7 @@ constructor(
 
         log { "\tGet maxNotifWithoutSavingSpace ---" }
         val maxNotifWithoutSavingSpace =
-            stackHeightSequence.lastIndexWhile { heightResult ->
+            stackHeights.lastIndexWhile { heightResult ->
                 allowedByPolicy(heightResult) &&
                     canStackFitInSpace(
                         heightResult,
@@ -240,7 +240,7 @@ constructor(
             log { "\tSAVE space ---" }
             saveSpaceOnLockscreen = true
             maxNotifications =
-                stackHeightSequence.lastIndexWhile { heightResult ->
+                stackHeights.lastIndexWhile { heightResult ->
                     allowedByPolicy(heightResult) &&
                         canStackFitInSpace(
                             heightResult,
@@ -253,7 +253,7 @@ constructor(
 
         // Must update views immediately to avoid mismatches between initial HUN layout height
         // and the height adapted to lockscreen space constraints, which causes jump cuts.
-        stack.showableChildren().toList().forEach { currentNotification ->
+        children.forEach { currentNotification ->
             run {
                 if (currentNotification is ExpandableNotificationRow) {
                     currentNotification.saveSpaceOnLockscreen = saveSpaceOnLockscreen
@@ -270,11 +270,11 @@ constructor(
         // Could be < 0 if the space available is less than the shelf size. Returns 0 in this case.
         maxNotifications = max(0, maxNotifications)
         log {
-            val sequence = if (SPEW) " stackHeightSequence=${stackHeightSequence.toList()}" else ""
+            val heights = if (SPEW) " stackHeights=$stackHeights" else ""
             "--- computeMaxKeyguardNotifications(" +
                 " notifSpace=$notifSpace" +
                 " shelfSpace=$shelfSpace" +
-                " shelfHeight=$shelfHeight) -> $maxNotifications$sequence"
+                " shelfHeight=$shelfHeight) -> $maxNotifications$heights"
         }
         log { "\n" }
         return maxNotifications
@@ -299,11 +299,13 @@ constructor(
         log { "\n" }
         log { "computeHeight --- reason: $reason" }
 
-        val stackHeightSequence = computeHeightPerNotificationLimit(stack, shelfHeight)
+        val children = stack.showableChildren()
+        val stackHeights =
+            computeHeightPerNotificationLimit(stack, shelfHeight, children, maxNotifs)
 
         val (notifsHeight, notifsHeightSavingSpace, shelfHeightWithSpaceBefore) =
-            stackHeightSequence.elementAtOrElse(maxNotifs) {
-                stackHeightSequence.last() // Height with all notifications visible.
+            stackHeights.getOrElse(maxNotifs) {
+                stackHeights.last() // Height with all notifications visible.
             }
 
         var height: Float
@@ -368,8 +370,11 @@ constructor(
     private fun computeHeightPerNotificationLimit(
         stack: NotificationStackScrollLayout,
         shelfHeight: Float,
-    ): Sequence<StackHeight> = sequence {
-        val children = stack.showableChildren().toList()
+        children: List<ExpandableView>,
+        maxResultIndex: Int = -1,
+    ): List<StackHeight> {
+        // Callers can scan the results more than once; a cold Sequence would repeat all work.
+        val stackHeights = ArrayList<StackHeight>(children.size + 1)
         var notifications = 0f
         var notifsWithCollapsedHun = 0f
         var previous: ExpandableView? = null
@@ -378,7 +383,7 @@ constructor(
         val counter = if (limitLockScreenToOneImportant) BucketTypeCounter() else null
 
         // Only shelf. This should never happen, since we allow 1 view minimum (EmptyViewState).
-        yield(
+        stackHeights.add(
             StackHeight(
                 notifsHeight = 0f,
                 notifsHeightSavingSpace = 0f,
@@ -387,7 +392,10 @@ constructor(
             )
         )
 
-        children.forEachIndexed { i, currentNotification ->
+        if (maxResultIndex == 0) return stackHeights
+
+        for (i in children.indices) {
+            val currentNotification = children[i]
             val space = getSpaceNeeded(currentNotification, i, previous, stack, onLockscreen)
             notifications += space.whenEnoughSpace
             notifsWithCollapsedHun += space.whenSavingSpace
@@ -436,7 +444,7 @@ constructor(
                     " child: ${row?.key}" +
                     " bucket: $bucket"
             }
-            yield(
+            stackHeights.add(
                 StackHeight(
                     notifsHeight = notifications,
                     notifsHeightSavingSpace = notifsWithCollapsedHun,
@@ -444,7 +452,9 @@ constructor(
                     shouldForceIntoShelf = counter?.shouldForceIntoShelf() ?: false,
                 )
             )
+            if (maxResultIndex >= 0 && stackHeights.lastIndex >= maxResultIndex) break
         }
+        return stackHeights
     }
 
     fun updateResources() {
@@ -455,9 +465,6 @@ constructor(
         dividerHeight =
             max(1f, resources.getDimensionPixelSize(R.dimen.notification_divider_height).toFloat())
     }
-
-    private val NotificationStackScrollLayout.childrenSequence: Sequence<ExpandableView>
-        get() = children.map { it as ExpandableView }
 
     @VisibleForTesting
     fun onLockscreen(): Boolean {
@@ -550,8 +557,15 @@ constructor(
         return stack.calculateGapHeight(previous, current, currentIndex) + dividerHeight
     }
 
-    private fun NotificationStackScrollLayout.showableChildren() =
-        this.childrenSequence.filter { it.isShowable(onLockscreen()) }
+    private fun NotificationStackScrollLayout.showableChildren(): List<ExpandableView> {
+        val showableChildren = ArrayList<ExpandableView>(childCount)
+        val onLockscreen = onLockscreen()
+        for (index in 0 until childCount) {
+            val child = getChildAt(index) as ExpandableView
+            if (child.isShowable(onLockscreen)) showableChildren.add(child)
+        }
+        return showableChildren
+    }
 
     /**
      * Can a view be shown on the lockscreen when calculating the number of allowed notifications to
@@ -589,9 +603,13 @@ constructor(
             this
         }
 
-    /** Returns the last index where [predicate] returns true, or -1 if it was always false. */
-    private fun <T> Sequence<T>.lastIndexWhile(predicate: (T) -> Boolean): Int =
-        takeWhile(predicate).count() - 1
+    /** Returns the last consecutive index where [predicate] returns true, or -1 for no match. */
+    private inline fun <T> List<T>.lastIndexWhile(predicate: (T) -> Boolean): Int {
+        for (index in indices) {
+            if (!predicate(this[index])) return index - 1
+        }
+        return lastIndex
+    }
 
     /** Counts the number of notifications for each type of bucket */
     data class BucketTypeCounter(var ongoing: Int = 0, var important: Int = 0, var other: Int = 0) {
