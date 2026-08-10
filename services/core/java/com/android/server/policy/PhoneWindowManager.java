@@ -7781,8 +7781,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 mCameraManager.setTorchMode(rearFlashCameraId, !mTorchEnabled);
                 mTorchEnabled = !mTorchEnabled;
             }
-        } catch (CameraAccessException e) {
-            // Ignore
+        } catch (CameraAccessException | IllegalArgumentException e) {
+            // Camera IDs can disappear while cameraserver or a provider is
+            // restarting. Never let a torch shortcut take down system_server.
+            mRearFlashCameraId = null;
+            Slog.w(TAG, "Unable to toggle torch", e);
         }
         // Setup torch off alarm
         if (mTorchEnabled && !origEnabled && mTorchTimeout > 0) {
