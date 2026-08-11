@@ -1119,9 +1119,19 @@ public class CameraServiceProxy extends SystemService
         synchronized(mLock) {
             mCameraServiceRaw = null;
 
-            // All cameras reset to idle on camera service death
+            // All cameras reset to idle on camera service death. Also release every package
+            // refresh-rate range installed while those cameras were active. Otherwise a
+            // cameraserver crash leaves the last clients permanently capped until system_server
+            // restarts, even though no camera is active anymore.
             boolean wasEmpty = mActiveCameraUsage.isEmpty();
+            ArraySet<String> activePackages = new ArraySet<>();
+            for (int i = 0; i < mActiveCameraUsage.size(); i++) {
+                activePackages.add(mActiveCameraUsage.valueAt(i).mClientName);
+            }
             mActiveCameraUsage.clear();
+            for (int i = 0; i < activePackages.size(); i++) {
+                removeRefreshRateRangeForPackageIfInactiveLocked(activePackages.valueAt(i));
+            }
 
             if ( mNotifyNfc && !wasEmpty ) {
                 notifyNfcService(/*enablePolling*/ true);
@@ -1341,6 +1351,25 @@ public class CameraServiceProxy extends SystemService
         return Math.max(Math.min(maxFps, MAX_PREVIEW_FPS), MIN_PREVIEW_FPS);
     }
 
+    @GuardedBy("mLock")
+    private boolean isCameraPackageActiveLocked(String clientName) {
+        for (int i = 0; i < mActiveCameraUsage.size(); i++) {
+            if (mActiveCameraUsage.valueAt(i).mClientName.equals(clientName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @GuardedBy("mLock")
+    private void removeRefreshRateRangeForPackageIfInactiveLocked(String clientName) {
+        if (isCameraPackageActiveLocked(clientName)) {
+            return;
+        }
+        WindowManagerInternal wmi = LocalServices.getService(WindowManagerInternal.class);
+        wmi.removeRefreshRateRangeForPackage(clientName);
+    }
+
     private void updateActivityCount(CameraSessionStats cameraState) {
         String cameraId = cameraState.getCameraId();
         int newCameraState = cameraState.getNewCameraState();
@@ -1393,13 +1422,7 @@ public class CameraServiceProxy extends SystemService
                 case CameraSessionStats.CAMERA_STATE_ACTIVE:
                     // Check current active camera IDs to see if this package is already talking to
                     // some camera
-                    boolean alreadyActivePackage = false;
-                    for (int i = 0; i < mActiveCameraUsage.size(); i++) {
-                        if (mActiveCameraUsage.valueAt(i).mClientName.equals(clientName)) {
-                            alreadyActivePackage = true;
-                            break;
-                        }
-                    }
+                    boolean alreadyActivePackage = isCameraPackageActiveLocked(clientName);
                     // If not already active, notify window manager about this new package using a
                     // camera
                     if (!alreadyActivePackage) {
@@ -1424,6 +1447,13 @@ public class CameraServiceProxy extends SystemService
                                 /*usedZoomOverride*/false, new Range<Integer>(0, 0),
                                 new CameraExtensionSessionStats());
                         mCameraEventHistory.add(oldEvent);
+                        // Some vendor camera stacks can report a new ACTIVE owner for an ID
+                        // without first reporting IDLE for the previous owner. The map entry was
+                        // replaced above, so release the old owner's cap if it has no other active
+                        // camera.
+                        if (!oldEvent.mClientName.equals(clientName)) {
+                            removeRefreshRateRangeForPackageIfInactiveLocked(oldEvent.mClientName);
+                        }
                     }
                     break;
                 case CameraSessionStats.CAMERA_STATE_IDLE:
@@ -1439,22 +1469,9 @@ public class CameraServiceProxy extends SystemService
                         // Do not double count device error
                         deviceError = false;
 
-                        // Check current active camera IDs to see if this package is still
-                        // talking to some camera
-                        boolean stillActivePackage = false;
-                        for (int i = 0; i < mActiveCameraUsage.size(); i++) {
-                            if (mActiveCameraUsage.valueAt(i).mClientName.equals(clientName)) {
-                                stillActivePackage = true;
-                                break;
-                            }
-                        }
-                        // If not longer active, notify window manager about this package being done
-                        // with camera
-                        if (!stillActivePackage) {
-                            WindowManagerInternal wmi =
-                                    LocalServices.getService(WindowManagerInternal.class);
-                            wmi.removeRefreshRateRangeForPackage(clientName);
-                        }
+                        // Use the owner recorded by the ACTIVE event rather than trusting the
+                        // client name carried by a later vendor IDLE/CLOSED callback.
+                        removeRefreshRateRangeForPackageIfInactiveLocked(doneEvent.mClientName);
                     }
 
                     if (newCameraState == CameraSessionStats.CAMERA_STATE_CLOSED) {
