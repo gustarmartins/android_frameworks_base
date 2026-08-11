@@ -21,11 +21,13 @@ import static com.android.systemui.statusbar.phone.HeadsUpAppearanceController.C
 
 import android.content.Context;
 import android.content.res.Configuration;
+import android.database.ContentObserver;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.drawable.Icon;
+import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.Property;
@@ -166,11 +168,51 @@ public class NotificationIconContainer extends ViewGroup {
     private int mThemedTextColorPrimaryInverse;
     @Nullable private Runnable mIsolatedIconAnimationEndRunnable;
     private boolean mUseIncreasedIconScale;
+    private boolean mColoredIconsEnabled;
+    private final ContentObserver mColoredIconsObserver = new ContentObserver(null) {
+        @Override
+        public void onChange(boolean selfChange) {
+            // ContentObserver callbacks can arrive on a Binder thread when no Handler is supplied.
+            // Keep all view state changes on this View's UI thread.
+            post(NotificationIconContainer.this::updateColoredIconsEnabled);
+        }
+    };
 
     public NotificationIconContainer(Context context, AttributeSet attrs) {
         super(context, attrs);
         initResources();
         setWillNotDraw(!(DEBUG || DEBUG_OVERFLOW));
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        getContext().getContentResolver().registerContentObserver(
+                Settings.System.getUriFor(Settings.System.STATUSBAR_COLORED_ICONS),
+                false,
+                mColoredIconsObserver,
+                UserHandle.USER_ALL);
+        updateColoredIconsEnabled();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        getContext().getContentResolver().unregisterContentObserver(mColoredIconsObserver);
+        super.onDetachedFromWindow();
+    }
+
+    private void updateColoredIconsEnabled() {
+        final boolean coloredIconsEnabled = Settings.System.getIntForUser(
+                getContext().getContentResolver(),
+                Settings.System.STATUSBAR_COLORED_ICONS,
+                0,
+                UserHandle.USER_CURRENT) == 1;
+        if (mColoredIconsEnabled == coloredIconsEnabled) {
+            return;
+        }
+        mColoredIconsEnabled = coloredIconsEnabled;
+        requestLayout();
+        invalidate();
     }
 
     private void initResources() {
@@ -833,9 +875,7 @@ public class NotificationIconContainer extends ViewGroup {
                     }
                 }
                 icon.setVisibleState(visibleState, animationsAllowed);
-                boolean newIconStyle = Settings.System.getInt(getContext().getContentResolver(),
-                            Settings.System.STATUSBAR_COLORED_ICONS, 0) == 1;
-                if (icon.getStatusBarIcon().pkg.contains("systemui") || !newIconStyle) {
+                if (icon.getStatusBarIcon().pkg.contains("systemui") || !mColoredIconsEnabled) {
                     if (mOverrideIconColor) {
                         int overrideIconColor = mUseInverseOverrideIconColor
                                 ? mThemedTextColorPrimaryInverse : mThemedTextColorPrimary;
@@ -885,9 +925,7 @@ public class NotificationIconContainer extends ViewGroup {
             super.initFrom(view);
             if (view instanceof StatusBarIconView) {
                 StatusBarIconView icon = (StatusBarIconView) view;
-                boolean newIconStyle = Settings.System.getInt(getContext().getContentResolver(),
-                            Settings.System.STATUSBAR_COLORED_ICONS, 0) == 1;
-                if (icon.getStatusBarIcon().pkg.contains("systemui") || !newIconStyle) {
+                if (icon.getStatusBarIcon().pkg.contains("systemui") || !mColoredIconsEnabled) {
                     iconColor = ((StatusBarIconView) view).getStaticDrawableColor();
                 } else {
                     iconColor = StatusBarIconView.NO_COLOR;
